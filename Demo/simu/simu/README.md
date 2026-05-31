@@ -1,0 +1,102 @@
+# DTS-Simulation
+
+Initial Python scaffold for the second-cycle Drone Tracking System acoustic localization simulation.
+
+## Current Scope
+
+This repository defines the initial data and module boundaries for:
+
+- three microphone arrays;
+- eight microphones per array;
+- one second of sampling at 48 kHz;
+- one raw array matrix with shape `8 x 48000`;
+- one system tensor with shape `3 x 8 x 48000`;
+- Team 1 output of one direction-of-arrival estimate per array.
+
+One-array 3D narrowband frequency-domain MUSIC is implemented for synthetic
+validation inputs. Bounded 3D ray least-squares localization is implemented for
+known array poses and direction estimates. A single-shot non-graphical
+synthetic scenario runner now exercises the MUSIC-to-localization data flow and
+stores a virtual aim target. Static visualization and offline PNG playback are
+implemented as presentation layers over scenario results. Interactive UI,
+real-time animation, and launcher behavior remain deferred. `launcher.py` is
+virtual-only and contains no hardware-control logic.
+
+## Stack
+
+- Python `>=3.11`
+- NumPy for FFT, complex arrays, covariance, and eigendecomposition
+- Standard-library unit tests
+- `setuptools` packaging with a `src/` package layout
+
+## Setup
+
+An editable installation exposes the console command:
+
+```powershell
+python -m pip install -e .
+```
+
+The scaffold can also be validated directly from a checkout without installation:
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m unittest discover -s tests -v
+python -m dts_simulation
+python -m dts_simulation.visualization
+python -m dts_simulation.playback
+python -m dts_simulation.playback --gif
+```
+
+After editable installation, run:
+
+```powershell
+python -m unittest discover -s tests -v
+dts-simulation
+```
+
+## Module Boundaries
+
+- `models.py`: validated data contracts for samples, configurations, direction estimates, and later localization results.
+- `array_geometry.py`: configuration validation only; no assumed physical layout.
+- `signal_generator.py`: deterministic silent input data for tests and scaffold execution, not a physical acoustic model.
+- `music_doa.py`: bounded one-array 3D narrowband frequency-domain MUSIC estimator for synthetic validation inputs.
+- `localization.py`: bounded 3D ray least-squares source-position estimation from known array poses and direction estimates.
+- `simulation.py`: single-shot non-graphical synthetic scenario runner and CLI summary.
+- `visualization.py`: static single-shot 3D renderer that consumes `ScenarioResult` and writes an ignored PNG artifact.
+- `playback.py`: offline PNG frame-sequence generator that consumes multiple `ScenarioResult` snapshots, writes ignored frames under `outputs/playback/`, and can export an ignored GIF to `outputs/dts_playback.gif`.
+- `launcher.py`: virtual aiming state only; no serial, GPIO, firing, or physical-device operations.
+
+## DOA Contract
+
+The pre-implementation 3D coordinate, azimuth/elevation, geometry, sampling,
+frequency-domain MUSIC, and quality-score conventions are specified in
+[`docs/doa-contract.md`](docs/doa-contract.md).
+
+## Localization Contract
+
+The multi-array 3D localization contract is specified in
+[`docs/localization-contract.md`](docs/localization-contract.md). The current
+solver is simulation/math validation only and does not claim real-world
+localization accuracy.
+
+## Visual Simulation Contract
+
+The future visual layer contract is specified in
+[`docs/visual-simulation-contract.md`](docs/visual-simulation-contract.md). It
+defines graphics as a consumer of `ScenarioResult`, not an algorithm
+reimplementation.
+
+The future moving-drone playback contract is specified in
+[`docs/animation-playback-contract.md`](docs/animation-playback-contract.md).
+It defines animation as a consumer of `ScenarioResult`-derived frame snapshots,
+not an algorithm layer.
+
+## Deferred Decisions
+
+Broadband acoustic modeling, multi-bin MUSIC fusion, launcher behavior, and
+final visualization technology remain deferred until explicitly implemented and
+validated. The current MUSIC implementation is
+narrowband and simulation-only. Its quality score is `(best - median) / best`
+over the MUSIC spectrum, clipped to `[0, 1]`; it is not a calibrated
+probability or real-world confidence measure.

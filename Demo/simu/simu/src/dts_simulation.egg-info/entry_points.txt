@@ -1,0 +1,2 @@
+[console_scripts]
+dts-simulation = dts_simulation.simulation:main
