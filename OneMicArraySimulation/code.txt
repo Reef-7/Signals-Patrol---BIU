@@ -1,0 +1,147 @@
+import numpy as np
+import sounddevice as sd
+
+class UMA8MUSICEstimator:
+    def __init__(self, fs=48000, c=343.0, radius=0.0425):
+        """
+        fs: תדר דגימה (48kHz)
+        c: מהירות הקול במטרים לשנייה
+        radius: הרדיוס של מעגל המיקרופונים ב-UMA8 (כ-4.25 סנטימטרים)
+        """
+        self.fs = fs
+        self.c = c
+        self.radius = radius
+        self.num_mics = 7  # מיקרופון מרכזי + 6 מסביב
+        
+        # בניית קואורדינטות: מיקרופון 0 במרכז (0,0), מיקרופונים 1-6 במעגל
+        self.mic_coords = np.zeros((self.num_mics, 2))
+        angles = np.linspace(0, 2 * np.pi, 6, endpoint=False)
+        for i, angle in enumerate(angles):
+            self.mic_coords[i + 1, 0] = self.radius * np.cos(angle)
+            self.mic_coords[i + 1, 1] = self.radius * np.sin(angle)
+
+    def _select_target_frequency(self, audio_row):
+        """
+        בוחר תדר דומיננטי מתוך הרעש שהוקלט (רצוי זמזום מנועי רחפן).
+        מגביל את החיפוש עד 3500Hz כדי למנוע Spatial Aliasing עקב המרחק בין המיקרופונים.
+        """
+        f_axis = np.fft.rfftfreq(len(audio_row), d=1/self.fs)
+        fft_mag = np.abs(np.fft.rfft(audio_row))
+
+        f_min, f_max = 300.0, 3500.0
+        valid_mask = (f_axis >= f_min) & (f_axis <= f_max)
+
+        if not np.any(valid_mask):
+            return f_axis[np.argmax(fft_mag)]
+
+        best_idx = np.argmax(fft_mag * valid_mask)
+        return float(f_axis[best_idx])
+
+    def compute_covariance_matrix(self, array_data, target_freq):
+        n_samples = array_data.shape[1]
+        segment_len = 512
+        n_segments = n_samples // segment_len
+
+        freq_axis = np.fft.rfftfreq(segment_len, d=1/self.fs)
+        freq_idx  = np.argmin(np.abs(freq_axis - target_freq))
+
+        X = np.zeros((self.num_mics, n_segments), dtype=complex)
+        for s in range(n_segments):
+            block = array_data[:, s*segment_len:(s+1)*segment_len]
+            X[:, s] = np.fft.rfft(block, axis=1)[:, freq_idx]
+
+        Rxx = (X @ X.conj().T) / n_segments
+        return Rxx
+
+    def run_music(self, array_data, target_freq, az_step=2, el_step=2):
+        Rxx = self.compute_covariance_matrix(array_data, target_freq)
+        eigenvalues, eigenvectors = np.linalg.eigh(Rxx)
+
+        idx = np.argsort(eigenvalues)
+        eigenvectors = eigenvectors[:, idx]
+
+        n_src = 1
+        Un = eigenvectors[:, :self.num_mics - n_src]
+        Un_UnH = Un @ Un.conj().T
+
+        wavenumber = 2 * np.pi * target_freq / self.c
+
+        def steering(az_deg, el_deg):
+            az = np.radians(az_deg)
+            el = np.radians(el_deg)
+            
+            # וקטור הכיוון הגיאומטרי
+            u = np.array([np.cos(el) * np.cos(az), np.cos(el) * np.sin(az)])
+            
+            # חישוב עיכוב הפאזה על בסיס קואורדינטות ה-x,y של כל מיקרופון (מכפלה פנימית)
+            delays = self.mic_coords @ u
+            phase = wavenumber * delays
+            return np.exp(1j * phase)
+
+        def spectrum(az_deg, el_deg):
+            a = steering(az_deg, el_deg)
+            denom = np.real(a.conj() @ Un_UnH @ a)
+            return 1.0 / (denom + 1e-10)
+
+        # --- שלב א׳: סריקה גסה ---
+        best_val = -1
+        best_az, best_el = 0.0, 0.0
+
+        for az in np.arange(0, 360, az_step):
+            for el in np.arange(0, 90, el_step):
+                val = spectrum(az, el)
+                if val > best_val:
+                    best_val, best_az, best_el = val, az, el
+
+        # --- שלב ב׳: רזולוציה עדינה סביב הפיק ---
+        fine_az = np.arange(best_az - az_step, best_az + az_step + 0.1, 0.5)
+        fine_el = np.arange(max(0, best_el - el_step), best_el + el_step + 0.1, 0.5)
+        
+        for az in fine_az:
+            for el in fine_el:
+                val = spectrum(az % 360, el)
+                if val > best_val:
+                    best_val, best_az, best_el = val, az % 360, el
+
+        return round(best_az, 1), round(best_el, 1)
+
+
+def main():
+    fs = 48000
+    duration = 2.0  # משך ההקלטה בשניות
+    channels = 8    # מושכים 8 ערוצים כפי שהדרייבר דורש, אך נשתמש רק ב-7
+
+    print("🎙️ פותח ערוץ ל-UMA8. מתחיל דגימה (צור רעש או הפעל רחפן ברקע!)...")
+    try:
+        # דגימה חיה מכל הערוצים במקביל ב-24-bit Float
+        audio_data = sd.rec(int(duration * fs), samplerate=fs, channels=channels, dtype='float32')
+        sd.wait()
+    except Exception as e:
+        print(f" שגיאה בגישה למיקרופון: {e}")
+        print("ודא שההתקן מוגדר כברירת מחדל ושדרייבר ה-ASIO תקין.")
+        return
+
+    print(" ההקלטה הסתיימה! מנתח נתונים...\n")
+    
+    # המרת המטריצה למבנה (ערוצים X דגימות) ולקיחת רק 7 מיקרופונים
+    # audio_data.T מבצע Transpose כדי שהשורות יהיו הערוצים.
+    audio_matrix = audio_data.T[:7, :]
+
+    estimator = UMA8MUSICEstimator(fs=fs)
+    
+    # חילוץ תדר הדומיננטי מהמיקרופון המרכזי (ערוץ 0)
+    target_freq = estimator._select_target_frequency(audio_matrix[0])
+    print(f"📡 תדר אות דומיננטי נבחר לאיתור (DOA): {target_freq:.1f} Hz")
+
+    # הרצת MUSIC והדפסת הפלט
+    az, el = estimator.run_music(audio_matrix, target_freq)
+
+    print("=" * 40)
+    print(" תוצאות איתור MUSIC:")
+    print(f"אזימוט (זווית אופקית): {az}°")
+    print(f"הגבהה (זווית אנכית):  {el}°")
+    print("=" * 40)
+    print("הנתונים מוכנים לשליחה לקבוצת הטריאנגולציה!")
+
+if __name__ == "__main__":
+    main()
